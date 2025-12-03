@@ -162,6 +162,21 @@ body {
     flex: 1;
 }
 
+/* Google Sign-In */
+#g_id_onload,
+.g_id_signin {
+    display: flex;
+    justify-content: center;
+    margin-top: 15px;
+}
+
+.g_id_signin {
+    width: 100%;
+    max-width: 300px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
 .error-message {
     color: #ff6b6b;
     margin-top: 15px;
