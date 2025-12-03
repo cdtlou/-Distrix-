@@ -22,16 +22,6 @@ class UIManager {
         document.getElementById('createBtn').addEventListener('click', () => this.createAccount());
         document.getElementById('loginBtn').addEventListener('click', () => this.login());
         
-        // GitHub Login Button
-        const githubLoginBtn = document.getElementById('githubLoginBtn');
-        if (githubLoginBtn) {
-            githubLoginBtn.addEventListener('click', () => {
-                if (window.githubAuth) {
-                    window.githubAuth.loginWithGitHub();
-                }
-            });
-        }
-        
         // Permettre la connexion avec Entrée
         document.getElementById('pseudoInput').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this.login();
@@ -158,17 +148,6 @@ class UIManager {
             this.showError('');
             document.getElementById('pseudoInput').value = '';
             document.getElementById('codeInput').value = '';
-            
-            // Charger les comptes depuis GitHub si l'utilisateur est connecté
-            if (window.githubAuth && window.githubAuth.isAuthenticated) {
-                window.githubAuth.loadAccountsFromGitHub().then(githubAccounts => {
-                    if (githubAccounts) {
-                        // Fusionner les comptes GitHub avec les comptes locaux
-                        accountSystem.accounts = { ...accountSystem.accounts, ...githubAccounts };
-                        accountSystem.saveAccounts();
-                    }
-                });
-            }
             
             // Vérifier que l'utilisateur est bien connecté
             setTimeout(() => {
