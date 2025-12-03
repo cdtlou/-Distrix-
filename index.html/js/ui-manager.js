@@ -68,6 +68,13 @@ class UIManager {
         // CASIER PAGE
         document.getElementById('closeCasierBtn').addEventListener('click', () => this.showPage('lobbyPage'));
 
+        // VERSION DISPLAY (clicker pour voir le changelog)
+        const versionDisplay = document.getElementById('versionDisplay');
+        if (versionDisplay) {
+            versionDisplay.style.cursor = 'pointer';
+            versionDisplay.addEventListener('click', () => this.showChangelog());
+        }
+
         // GAME PAGE
         document.getElementById('pauseBtn').addEventListener('click', () => this.toggleGamePause());
         document.getElementById('exitGameBtn').addEventListener('click', () => this.exitGame());
@@ -170,18 +177,18 @@ class UIManager {
 
         document.getElementById('lobbyUsername').textContent = user.pseudo;
         document.getElementById('lobbyLevel').textContent = user.level;
-        // Calculer l'XP requis pour le niveau suivant
-        const currentLevelXp = XpSystem.getXpRequiredForLevel(user.level);
-        const nextLevelXp = XpSystem.getXpRequiredForLevel(user.level + 1);
-        const xpInLevel = user.xp - currentLevelXp;
-        const xpRequiredForLevel = nextLevelXp - currentLevelXp;
-
-        // Afficher l'XP relative au niveau courant (progression), pas le total global
-        document.getElementById('lobbyXP').textContent = xpInLevel;
-        document.getElementById('lobbyXPRequired').textContent = xpRequiredForLevel;
+        
+        // Obtenir la progression XP pour le prochain niveau
+        const xpProgress = XpSystem.getXpProgressForLevel(user.xp);
+        
+        // Afficher: XP actuel total / XP total nécessaire pour PROCHAIN niveau
+        const nextLevelXpRequired = XpSystem.getXpRequiredForLevel(xpProgress.nextLevel);
+        
+        document.getElementById('lobbyXP').textContent = user.xp;
+        document.getElementById('lobbyXPRequired').textContent = nextLevelXpRequired;
 
         // Barre de progression (s'assurer de ne pas diviser par 0)
-        const percentage = xpRequiredForLevel > 0 ? (xpInLevel / xpRequiredForLevel) * 100 : 0;
+        const percentage = xpProgress.percentage;
         document.getElementById('lobbyXPFill').style.width = Math.max(0, Math.min(100, percentage)) + '%';
 
         // Record
@@ -226,6 +233,7 @@ class UIManager {
             
             const isUnlocked = ShopSystem.isItemUnlocked('skins', skin.id, user.level);
             const isOwned = accountSystem.isItemOwned('skins', skin.id);
+            const xpRequired = ShopSystem.getXpRequiredForItem('skins', skin.id);
             
             if (!isUnlocked) {
                 div.classList.add('locked');
@@ -238,6 +246,7 @@ class UIManager {
                 ${colorSquare}
                 <div class="shop-item-name">${skin.name}</div>
                 <div class="shop-item-level">Niveau ${skin.level}</div>
+                <div class="shop-item-xp" style="font-size: 12px; color: #ffd700; margin-bottom: 8px;">XP: ${xpRequired.toLocaleString()}</div>
                 <button class="shop-item-button" ${!isUnlocked ? 'disabled' : ''}
                         onclick="uiManager.buySkin(${skin.id})">
                     ${isOwned ? '✓ Possédé' : 'Débloquer'}
@@ -257,6 +266,7 @@ class UIManager {
             
             const isUnlocked = ShopSystem.isItemUnlocked('musics', music.id, user.level);
             const isOwned = accountSystem.isItemOwned('musics', music.id);
+            const xpRequired = ShopSystem.getXpRequiredForItem('musics', music.id);
             
             if (!isUnlocked) {
                 div.classList.add('locked');
@@ -265,6 +275,7 @@ class UIManager {
             div.innerHTML = `
                 <div class="shop-item-name">${music.emoji} ${music.name}</div>
                 <div class="shop-item-level">Niveau ${music.level}</div>
+                <div class="shop-item-xp" style="font-size: 12px; color: #ffd700; margin-bottom: 8px;">XP: ${xpRequired.toLocaleString()}</div>
                 <button class="shop-item-button" ${!isUnlocked ? 'disabled' : ''}
                         onclick="uiManager.buyMusic(${music.id})">
                     ${isOwned ? '✓ Possédé' : 'Débloquer'}
@@ -292,8 +303,8 @@ class UIManager {
         }
 
         accountSystem.buyItem('skins', skinId);
-        // Équiper automatiquement le nouveau skin
-        accountSystem.equipItem('skins', skinId);
+        // Équiper automatiquement le nouveau skin avec synchronisation robuste
+        accountSystem.syncEquipmentChange('skins', skinId);
         alert('Skin débloqué et équipé!');
         this.displayShop();
         this.displayCasier();
@@ -316,8 +327,8 @@ class UIManager {
         }
 
         accountSystem.buyItem('musics', musicId);
-        // Équiper automatiquement la nouvelle musique
-        accountSystem.equipItem('musics', musicId);
+        // Équiper automatiquement la nouvelle musique avec synchronisation robuste
+        accountSystem.syncEquipmentChange('musics', musicId);
         alert('Musique débloquée et équipée!');
         this.displayShop();
         this.displayCasier();
@@ -411,12 +422,12 @@ class UIManager {
     }
 
     equipSkin(skinId) {
-        accountSystem.equipItem('skins', skinId);
+        accountSystem.syncEquipmentChange('skins', skinId);
         this.displayCasier();
     }
 
     equipMusic(musicId) {
-        accountSystem.equipItem('musics', musicId);
+        accountSystem.syncEquipmentChange('musics', musicId);
         this.displayCasier();
     }
 
@@ -636,6 +647,75 @@ class UIManager {
     // so existing initialization calls won't cause errors.
     setupBackupEventListeners() {
         return; // intentionally empty
+    }
+
+    // ============ AFFICHAGE DU CHANGELOG ============
+    showChangelog() {
+        const changelog = window.appChangelog || 'Aucun changelog disponible';
+        const version = window.appVersion || '0.01';
+        
+        // Créer un popup avec le changelog
+        const modal = document.createElement('div');
+        modal.id = 'changelogModal';
+        modal.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 10000;
+        `;
+        
+        const content = document.createElement('div');
+        content.style.cssText = `
+            background: linear-gradient(135deg, #1a1f3a 0%, #2d2156 100%);
+            border: 2px solid #667eea;
+            border-radius: 15px;
+            padding: 25px;
+            max-width: 600px;
+            max-height: 70vh;
+            overflow-y: auto;
+            box-shadow: 0 10px 40px rgba(102, 126, 234, 0.3);
+        `;
+        
+        content.innerHTML = `
+            <div style="text-align: center; margin-bottom: 15px;">
+                <h2 style="color: #667eea; margin-bottom: 5px;">📝 Changelog</h2>
+                <p style="color: #999; font-size: 14px;">Version ${version}</p>
+            </div>
+            <div style="white-space: pre-line; font-size: 13px; line-height: 1.6; color: #ddd; font-family: monospace;">
+                ${changelog.split('\n').map(line => {
+                    if (line.startsWith('v')) {
+                        return `<span style="color: #667eea; font-weight: bold;">${line}</span>`;
+                    } else if (line.startsWith('-')) {
+                        return `<span style="color: #90ee90;">├─ ${line.substring(1)}</span>`;
+                    }
+                    return line;
+                }).join('\n')}
+            </div>
+            <div style="text-align: center; margin-top: 20px;">
+                <button id="closeChangelogBtn" class="btn btn-primary" style="padding: 10px 25px;">Fermer</button>
+            </div>
+        `;
+        
+        modal.appendChild(content);
+        document.body.appendChild(modal);
+        
+        // Fermer le modal
+        document.getElementById('closeChangelogBtn').addEventListener('click', () => {
+            modal.remove();
+        });
+        
+        // Fermer en cliquant sur le fond
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                modal.remove();
+            }
+        });
     }
 }
 

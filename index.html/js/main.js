@@ -1,8 +1,58 @@
+// ============ SYSTÈME DE VERSION ============
+let appVersion = '0.01'; // Version par défaut
+let appChangelog = ''; // Changelog par défaut
+
+// Charger la version depuis le fichier version.txt
+fetch('version.txt')
+    .then(response => response.text())
+    .then(text => {
+        appVersion = text.trim();
+        console.log(`📦 Version actuelle: ${appVersion}`);
+        
+        // Mettre à jour l'affichage de la version dans le lobby
+        const versionDisplay = document.getElementById('versionDisplay');
+        if (versionDisplay) {
+            versionDisplay.textContent = `v${appVersion}`;
+        }
+    })
+    .catch(error => {
+        console.warn('⚠️ Impossible de charger la version:', error);
+        console.log(`📦 Utilisation de la version par défaut: ${appVersion}`);
+    });
+
+// Charger le changelog depuis le fichier changelog.txt
+fetch('changelog.txt')
+    .then(response => response.text())
+    .then(text => {
+        appChangelog = text.trim();
+        console.log(`📝 Changelog chargé`);
+    })
+    .catch(error => {
+        console.warn('⚠️ Impossible de charger le changelog:', error);
+        appChangelog = 'Aucun changelog disponible';
+    });
+
+// Exporter les variables globalement
+window.appVersion = appVersion;
+window.appChangelog = appChangelog;
+
 // ============ INITIALISATION PRINCIPALE ============
 document.addEventListener('DOMContentLoaded', () => {
     // DEBUG: Vérifier l'état complet du stockage au démarrage
     console.log('🚀 Démarrage - Vérification du stockage...');
     accountSystem.debugVerifyStorage();
+    
+    // FORCE UPDATE DE TOUS LES COMPTES (appliquer les changements importants à tout le monde)
+    console.log('🔄 Mise à jour des comptes...');
+    const updatedCount = accountSystem.forceUpdateAllAccounts();
+    
+    // TEST XP SYSTEM (pour vérifier que les affichages sont corrects)
+    console.log('🔍 Vérification du système XP:');
+    console.log('   Niveau 1:', window.XpSystem.getXpRequiredForLevel(1), 'XP (doit être 0)');
+    console.log('   Niveau 2:', window.XpSystem.getXpRequiredForLevel(2), 'XP (doit être 150)');
+    console.log('   Niveau 3:', window.XpSystem.getXpRequiredForLevel(3), 'XP (doit être 500)');
+    console.log('   Niveau 4:', window.XpSystem.getXpRequiredForLevel(4), 'XP (doit être 1200)');
+    console.log('   Niveau 5:', window.XpSystem.getXpRequiredForLevel(5), 'XP (doit être 2000)');
     
     // VÉRIFICATION DE SAUVEGARDES
     // Si les comptes principaux sont vides, essayer de récupérer depuis le backup
