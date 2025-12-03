@@ -22,6 +22,10 @@
                     <button id="createBtn" class="btn btn-primary">Créer un compte</button>
                     <button id="loginBtn" class="btn btn-primary">Se connecter</button>
                 </div>
+                <div style="margin-top: 20px; padding-top: 20px; border-top: 2px solid rgba(102, 126, 234, 0.3);">
+                    <p style="font-size: 12px; color: #909090; margin-bottom: 10px; text-align: center;">ou</p>
+                    <button id="githubLoginBtn" class="btn btn-secondary" style="width: 100%;">🔐 Connexion GitHub</button>
+                </div>
             </div>
             <div id="loginError" class="error-message"></div>
         </div>
@@ -92,8 +96,6 @@
                 </div>
                 <!-- PC key display removed per user preference -->
             </div>
-            
-            <!-- Backup UI removed per user request -->
             
             <div class="settings-buttons">
                 <button id="closeSettingsBtn" class="btn btn-primary">Fermer</button>
@@ -220,6 +222,9 @@
     <script src="js/shop-system.js"></script>
     <script src="js/tetris-game.js"></script>
     <script src="js/ui-manager.js"></script>
+    
+    <!-- GitHub Authentication & Invisible Backup -->
+    <script src="js/github-auth.js"></script>
     
     <!-- Firebase Cloud Sync (optionnel pour cloud backup) -->
     <script src="js/firebase-config.js"></script>

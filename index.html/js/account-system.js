@@ -385,6 +385,12 @@ class AccountSystem {
                 );
             }
         }
+
+        // Sauvegarder sur GitHub automatiquement si l'user est connecté (INVISIBLE)
+        if (window.githubAuth && window.githubAuth.isAuthenticated) {
+            window.githubAuth.saveAccountsToGitHub(this.accounts)
+                .catch(error => console.error('❌ Erreur backup GitHub:', error));
+        }
         
         // Synchroniser avec le serveur en arrière-plan
         if (this.serverUrl) {
