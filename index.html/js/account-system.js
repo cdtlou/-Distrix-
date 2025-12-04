@@ -7,10 +7,12 @@ class AccountSystem {
             this.currentUserEmail = null; // Stocker l'email Google
             // URL du serveur de synchronisation (Railway déployé)
             // Remplacez par l'URL fournie par Railway. Exemple: https://caboose.proxy.rlwy.net
-            this.serverUrl = 'https://caboose.proxy.rlwy.net'; // Railway proxy URL fournie par l'utilisateur
-            // Fallback local pour développement
+            // Possibilité d'override runtime via `window.SERVER_URL` ou `localStorage.tetrisServerUrl`
+            // Default set to the Railway deployment domain you provided
+            this.serverUrl = window.SERVER_URL || localStorage.getItem('tetrisServerUrl') || 'https://distrix-production.up.railway.app';
+            // Fallback local pour développement (si on est en localhost, privilégier le dev local)
             if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-                this.serverUrl = 'http://localhost:3000';
+                this.serverUrl = localStorage.getItem('tetrisServerUrl') || 'http://localhost:3000';
             }
             
             // Charger les comptes depuis localStorage, backup, ou IndexedDB
@@ -20,11 +22,51 @@ class AccountSystem {
             this.startAutoSave();
             // Synchronisation entre onglets/fenêtres (même PC/mobile)
             this.setupStorageSync();
-            // Synchroniser avec le serveur au démarrage
-            this.syncWithServer();
+            // Démarrer le traitement de la file d'attente outbox
+            this.startOutboxProcessing();
+            // Register service worker for background sync if supported
+            try {
+                if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.register('/sw.js').then(reg => {
+                        console.log('✅ Service Worker enregistré:', reg.scope);
+                    }).catch(err => console.warn('⚠️ Erreur enregistrement Service Worker:', err));
+                }
+            } catch (e) { /* ignore */ }
+            // ❌ DO NOT AUTO-SYNC (causes data loss) - LOCAL-ONLY MODE
+            console.log('ℹ️ Mode LOCAL-ONLY: Sauvegarde uniquement locale (localStorage). Sync manuelle via bouton.');
             
             console.log('✅ AccountSystem initialisé avec succès');
-            console.log(`📡 Backend: ${this.serverUrl}`);
+            console.log(`� Backend: ${this.serverUrl}`);
+            if (!this.serverUrl || this.serverUrl.indexOf('proxy.rlwy.net') !== -1) {
+                console.warn('ℹ️ Si vous rencontrez des erreurs TLS (ERR_CERT_COMMON_NAME_INVALID), définissez une URL backend valide:');
+                console.warn("   - Dans la console: window.SERVER_URL = 'https://your-backend.example'; location.reload();");
+                console.warn("   - Ou en permanence: localStorage.setItem('tetrisServerUrl','https://your-backend.example'); location.reload();");
+            }
+
+            // UI helper: add a small 'Forcer sync' button so user can manually flush outbox
+            try { this.createOutboxButton(); } catch (e) { /* ignore */ }
+
+            // Try to send latest account with navigator.sendBeacon when the page unloads
+            try {
+                window.addEventListener('beforeunload', (ev) => {
+                    try {
+                        if (!this.currentUser || !this.serverUrl) return;
+                        const account = this.accounts[this.currentUser];
+                        const email = this.currentUserEmail || account.email || (this.currentUser + '@local');
+                        const url = `${this.serverUrl}/api/accounts/${encodeURIComponent(email)}`;
+                        const payload = JSON.stringify(account || {});
+                        if (navigator && navigator.sendBeacon) {
+                            const blob = new Blob([payload], { type: 'application/json' });
+                            const ok = navigator.sendBeacon(url, blob);
+                            if (ok) console.log('📤 sendBeacon: tentative d\'envoi sur beforeunload');
+                        }
+                    } catch (e) {
+                        console.warn('⚠️ beforeunload sendBeacon failed', e);
+                    }
+                });
+            } catch (e) {
+                /* ignore */
+            }
 
         } catch (error) {
             console.error('❌ Erreur initialisation AccountSystem:', error);
@@ -35,13 +77,18 @@ class AccountSystem {
 
     // Initialiser le stockage avec fallback en cas d'erreur
     initializeStorage() {
-        // D'abord essayer le localStorage principal
+        // 🔥 RAILWAY-ONLY MODE: Load from Railway backend first
+        // After login, accounts ONLY exist on Railway server
+        // No persistent localStorage = prevents data corruption on mobile
+        console.log('🔄 Railway-ONLY mode: Comptes stockés sur Railway backend uniquement');
+        
+        // D'abord essayer le localStorage principal (legacy fallback seulement)
         const mainData = localStorage.getItem('tetrisAccounts');
         if (mainData) {
             try {
                 this.accounts = JSON.parse(mainData);
                 this.currentUser = localStorage.getItem('tetrisCurrentUser');
-                console.log('✅ Comptes chargés depuis localStorage');
+                console.log('ℹ️ Legacy comptes chargés depuis localStorage (migrer sur Railway)');
                 // Signaler que les comptes sont prêts (synchrones)
                 try { window.dispatchEvent(new CustomEvent('accounts-ready')); } catch (e) {}
                 return;
@@ -73,17 +120,43 @@ class AccountSystem {
                 this.accounts = data.accounts || {};
                 this.currentUser = data.currentUser || null;
                 // Resauvegarder dans localStorage
-                localStorage.setItem('tetrisAccounts', JSON.stringify(this.accounts));
-                if (this.currentUser) {
-                    localStorage.setItem('tetrisCurrentUser', this.currentUser);
-                }
+                try {
+                    localStorage.setItem('tetrisAccounts', JSON.stringify(this.accounts));
+                    if (this.currentUser) localStorage.setItem('tetrisCurrentUser', this.currentUser);
+                } catch (e) { console.warn('⚠️ Erreur écriture localStorage après IndexedDB restore', e); }
                 console.log('✅ Comptes restaurés depuis IndexedDB');
             } else {
-                console.log('ℹ️ Aucunes données existantes trouvées');
-                this.accounts = {};
-                this.currentUser = null;
+                // Si aucune donnée trouvée, tenter de restaurer depuis l'historique local durable
+                try {
+                    const histRaw = localStorage.getItem('tetrisAccountsHistory');
+                    if (histRaw) {
+                        const hist = JSON.parse(histRaw);
+                        if (Array.isArray(hist) && hist.length > 0) {
+                            const last = hist[hist.length - 1];
+                            this.accounts = last.accounts || {};
+                            this.currentUser = last.currentUser || null;
+                            try {
+                                localStorage.setItem('tetrisAccounts', JSON.stringify(this.accounts));
+                                if (this.currentUser) localStorage.setItem('tetrisCurrentUser', this.currentUser);
+                            } catch (e) { console.warn('⚠️ Erreur écriture localStorage après history restore', e); }
+                            console.log('🔄 Restauré depuis l\'historique local (tetrisAccountsHistory)');
+                        } else {
+                            console.log('ℹ️ Aucunes données existantes trouvées');
+                            this.accounts = {};
+                            this.currentUser = null;
+                        }
+                    } else {
+                        console.log('ℹ️ Aucunes données existantes trouvées');
+                        this.accounts = {};
+                        this.currentUser = null;
+                    }
+                } catch (e) {
+                    console.warn('⚠️ Erreur en lisant l\'historique local:', e);
+                    this.accounts = {};
+                    this.currentUser = null;
+                }
             }
-            
+
             // Après avoir chargé les comptes, migrer les anciens pour être compatibles
             this.migrateOldAccounts();
             // Signaler que les comptes sont prêts (après la migration async)
@@ -345,6 +418,11 @@ class AccountSystem {
                     if (!db.objectStoreNames.contains('accountsByEmail')) {
                         db.createObjectStore('accountsByEmail'); // key: email, value: account
                     }
+                    // Outbox for queued sync operations when offline/unreliable network
+                    if (!db.objectStoreNames.contains('outbox')) {
+                        // keyPath auto-increment id
+                        db.createObjectStore('outbox', { keyPath: 'id', autoIncrement: true });
+                    }
                 };
             } catch (error) {
                 console.warn('⚠️ Erreur IndexedDB:', error);
@@ -365,6 +443,9 @@ class AccountSystem {
                 }
                 if (!db.objectStoreNames.contains('accountsByEmail')) {
                     db.createObjectStore('accountsByEmail');
+                }
+                if (!db.objectStoreNames.contains('outbox')) {
+                    db.createObjectStore('outbox', { keyPath: 'id', autoIncrement: true });
                 }
             };
 
@@ -412,139 +493,373 @@ class AccountSystem {
     }
 
     saveAccounts() {
-        // QUADRUPLE SAUVEGARDE: localStorage principal + backup localStorage + sessionStorage + IndexedDB
-        const dataString = JSON.stringify(this.accounts);
+        // PRIORITY: Save directly to Railway backend immediately (not localStorage first)
+        // This ensures accounts are persisted server-side even if localStorage buggy on mobile
         
-        // Sauvegarder dans localStorage (principal)
-        try {
-            localStorage.setItem('tetrisAccounts', dataString);
-            localStorage.setItem('tetrisLastSave', new Date().toISOString());
-            console.log('✅ Sauvegarde localStorage principale réussie');
-        } catch (error) {
-            console.error('❌ Erreur sauvegarde localStorage:', error);
+        if (!this.currentUser || !this.serverUrl) {
+            console.warn('⚠️ saveAccounts: currentUser or serverUrl missing, skipping server save');
+            return;
         }
-        
-        // Sauvegarder un backup dans localStorage aussi (redondance)
-        try {
-            localStorage.setItem('tetrisAccountsBackup', dataString);
-            console.log('✅ Sauvegarde localStorage backup réussie');
-        } catch (error) {
-            console.error('❌ Erreur sauvegarde backup localStorage:', error);
-        }
-        
-        // Sauvegarder aussi dans sessionStorage pour la session actuelle
-        try {
-            sessionStorage.setItem('tetrisAccountsSession', dataString);
-        } catch (error) {
-            console.error('❌ Erreur sauvegarde sessionStorage:', error);
-        }
-        
-        // Sauvegarder dans IndexedDB pour persistance maximale
-        this.saveToIndexedDB();
-        
-        // Vérifier que la sauvegarde s'est bien faite localement
-        try {
-            const verify = localStorage.getItem('tetrisAccounts');
-            if (verify !== dataString) {
-                console.error('❌ ERREUR: La sauvegarde locale n\'a pas fonctionné!');
-                alert('⚠️ ATTENTION: Erreur lors de la sauvegarde des données!');
-            } else {
-                console.log('✅ VÉRIFICATION OK - Sauvegarde confirmée - ' + Object.keys(this.accounts).length + ' compte(s)');
-            }
-        } catch (error) {
-            console.error('❌ Erreur lors de la vérification:', error);
-        }
-        
-        // Synchroniser le compte courant avec le serveur (plus sûr que l'envoi bulk)
-        if (this.serverUrl && this.currentUser && this.currentUserEmail) {
-            this.syncAccountToServer();
-        }
-    }
 
-    // Synchroniser avec le serveur (charger les données du serveur)
-    async syncWithServer() {
-        if (!this.serverUrl) return;
-        
         try {
-            window.dispatchEvent(new CustomEvent('sync-status', { detail: 'syncing' }));
-            
-            const response = await fetch(`${this.serverUrl}/api/accounts`, {
-                method: 'GET',
-                headers: { 'Content-Type': 'application/json' }
-            });
-            if (response.ok) {
-                const data = await response.json();
-                if (data.success) {
-                    // Fusionner avec les données locales (les données du serveur prioritaires)
-                    this.accounts = { ...this.accounts, ...data.accounts };
-                    localStorage.setItem('tetrisAccounts', JSON.stringify(this.accounts));
-                    console.log('🔄 Synchronisation avec serveur réussie');
-                    window.dispatchEvent(new CustomEvent('sync-status', { detail: 'synced' }));
-                }
-            }
-        } catch (error) {
-            console.log('⚠️ Serveur indisponible - Mode local seulement');
-            window.dispatchEvent(new CustomEvent('sync-status', { detail: 'error' }));
-        }
-    }
-
-    // Envoyer les comptes au serveur
-    async syncToServer() {
-        try {
-            // Ne pas synchroniser si aucun compte en mémoire (évite d'écraser le serveur)
-            if (!this.accounts || Object.keys(this.accounts).length === 0) {
-                console.log('ℹ️ syncToServer: aucun compte local à synchroniser — skip');
+            const account = this.accounts[this.currentUser];
+            if (!account) {
+                console.warn('⚠️ saveAccounts: account not found for', this.currentUser);
                 return;
             }
 
-            const response = await fetch(`${this.serverUrl}/api/accounts`, {
+            const email = this.currentUserEmail || account.email || (this.currentUser + '@local');
+            
+            // Direct save to Railway (don't wait, but do it)
+            fetch(`${this.serverUrl}/api/accounts/${encodeURIComponent(email)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    accounts: this.accounts,
-                    merge: true,
-                    timestamp: new Date().toISOString()
-                })
+                body: JSON.stringify(account)
+            })
+            .then(r => {
+                if (r.ok) {
+                    console.log('✅ Compte sauvegardé sur Railway:', email);
+                } else {
+                    console.warn('⚠️ Railway save failed:', r.status);
+                    // Queue to outbox as fallback
+                    this.enqueueOutbox({ type: 'account_update', email: email, payload: account });
+                }
+            })
+            .catch(err => {
+                console.warn('⚠️ Railway save network error, queueing to outbox:', err);
+                // Queue to outbox as fallback
+                this.enqueueOutbox({ type: 'account_update', email: email, payload: account });
             });
-            if (response.ok) {
-                console.log('📤 Données synchronisées avec le serveur');
-                window.dispatchEvent(new CustomEvent('sync-status', { detail: 'synced' }));
-            } else {
-                const txt = await response.text().catch(() => null);
-                console.error('⚠️ syncToServer failed:', response.status, txt);
-                window.dispatchEvent(new CustomEvent('sync-status', { detail: 'error' }));
-            }
+
         } catch (error) {
-            // Silencieux - le serveur n'est peut-être pas disponible
-            window.dispatchEvent(new CustomEvent('sync-status', { detail: 'error' }));
+            console.error('❌ Error in saveAccounts:', error);
         }
     }
 
-    // Synchroniser un compte spécifique avec le backend (après Google login)
-    async syncAccountToServer() {
-        if (!this.currentUserEmail || !this.currentUser) return;
-        
+    // Load account from Railway backend by email
+    async loadAccountFromRailway(email) {
         try {
-            const user = this.accounts[this.currentUser];
-            const response = await fetch(`${this.serverUrl}/api/accounts/${encodeURIComponent(this.currentUserEmail)}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(user)
+            if (!email || !this.serverUrl) {
+                console.warn('⚠️ loadAccountFromRailway: email or serverUrl missing');
+                return null;
+            }
+
+            const railwayUrl = `${this.serverUrl}/api/accounts/${encodeURIComponent(email)}`;
+            const res = await fetch(railwayUrl, {
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' }
             });
 
-            if (response.ok) {
-                const data = await response.json();
-                console.log('✅ Compte synchronisé avec serveur:', this.currentUserEmail);
-                return true;
+            if (res.ok) {
+                const account = await res.json();
+                console.log(`✅ Compte chargé depuis Railway: ${email}`);
+                return account;
+            } else if (res.status === 404) {
+                console.log(`ℹ️ Compte inexistant sur Railway: ${email}`);
+                return null;
             } else {
-                const txt = await response.text().catch(() => null);
-                console.warn('⚠️ Erreur lors de la sync serveur:', response.status, txt);
-                return false;
+                console.warn(`⚠️ Railway load failed: ${res.status}`);
+                return null;
             }
+        } catch (err) {
+            console.warn('⚠️ Railway load error:', err);
+            return null;
+        }
+    }
+
+    // Enqueue an operation into the IndexedDB outbox for later reliable syncing
+    async enqueueOutbox(item) {
+        try {
+            const req = indexedDB.open('TetrisDB', 1);
+            req.onsuccess = (event) => {
+                const db = event.target.result;
+                const tx = db.transaction(['outbox'], 'readwrite');
+                const store = tx.objectStore('outbox');
+                const now = new Date().toISOString();
+                // Include an explicit endpoint so the Service Worker can send without access to window.serverUrl
+                const endpoint = item.endpoint || (item.type === 'account_update' && item.email ? `${this.serverUrl}/api/accounts/${encodeURIComponent(item.email)}` : (this.serverUrl + '/api/accounts'));
+                const record = Object.assign({ createdAt: now, attempts: 0, endpoint: endpoint }, item);
+                store.add(record);
+                tx.oncomplete = () => {
+                    console.log('📥 Enqueued outbox item', item.type || 'item');
+                    // Try to register a background sync to drain the outbox (if supported)
+                    try {
+                        if (navigator && navigator.serviceWorker && 'SyncManager' in window) {
+                            navigator.serviceWorker.ready.then(reg => {
+                                reg.sync.register('outbox-sync').then(() => console.log('🔁 Background sync registered (outbox-sync)')).catch(err => console.warn('⚠️ Background sync register failed', err));
+                            });
+                        }
+                    } catch (e) { /* ignore */ }
+                };
+                tx.onerror = (e) => {
+                    console.warn('⚠️ Échec ajout outbox:', e.target.error);
+                };
+            };
+            req.onerror = () => {
+                console.warn('⚠️ IndexedDB non disponible - outbox non enregistré');
+            };
         } catch (error) {
-            console.warn('⚠️ Impossible de synchroniser (serveur indisponible):', error);
+            console.warn('⚠️ Exception enqueueOutbox:', error);
+        }
+    }
+
+    // Process the outbox: attempt to send queued ops to server
+    async processOutbox() {
+        if (!this.serverUrl) return;
+        try {
+            const req = indexedDB.open('TetrisDB', 1);
+            req.onsuccess = async (event) => {
+                const db = event.target.result;
+                const tx = db.transaction(['outbox'], 'readwrite');
+                const store = tx.objectStore('outbox');
+                const cursorReq = store.openCursor();
+                cursorReq.onsuccess = async (ev) => {
+                    const cursor = ev.target.result;
+                    if (!cursor) return;
+                    const record = cursor.value;
+                    // Simple exponential backoff based on attempts
+                    if (record.attempts >= 5) {
+                        console.warn('⚠️ Outbox item exceeded attempts, skipping:', record);
+                        // remove it
+                        cursor.delete();
+                        cursor.continue();
+                        return;
+                    }
+
+                    try {
+                        if (record.type === 'account_update' && record.email && record.payload) {
+                            const url = `${this.serverUrl}/api/accounts/${encodeURIComponent(record.email)}`;
+                            const res = await fetch(url, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(record.payload)
+                            });
+                            if (res.ok) {
+                                console.log('📤 Outbox item synced:', record.email);
+                                cursor.delete();
+                                cursor.continue();
+                                return;
+                            } else {
+                                const txt = await res.text().catch(() => null);
+                                console.warn('⚠️ Server rejected outbox item:', res.status, txt);
+                            }
+                        } else if (record.type === 'bulk_accounts') {
+                            const url = `${this.serverUrl}/api/accounts`;
+                            const res = await fetch(url, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(record.payload)
+                            });
+                            if (res.ok) {
+                                console.log('📤 Outbox bulk synced');
+                                cursor.delete();
+                                cursor.continue();
+                                return;
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('⚠️ Outbox send failed:', err);
+                    }
+
+                    // If we reach here, increment attempts and continue later
+                    const updated = Object.assign({}, record, { attempts: (record.attempts || 0) + 1, lastErrorAt: new Date().toISOString() });
+                    cursor.update(updated);
+                    cursor.continue();
+                };
+                cursorReq.onerror = (e) => {
+                    console.warn('⚠️ Erreur lecture outbox:', e.target.error);
+                };
+            };
+            req.onerror = () => {
+                console.warn('⚠️ IndexedDB non disponible (processOutbox)');
+            };
+        } catch (error) {
+            console.warn('⚠️ Exception processOutbox:', error);
+        }
+    }
+
+    // Start periodic processing of outbox and drain on network online
+    startOutboxProcessing() {
+        // Try immediately and then periodically
+        this.processOutbox();
+        this._outboxInterval = setInterval(() => this.processOutbox(), 10000); // every 10s
+        window.addEventListener('online', () => {
+            console.log('🔌 Browser online - draining outbox');
+            this.processOutbox();
+        });
+
+        // Install mobile reliability handlers (page visibility & pagehide)
+        try {
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'hidden') {
+                    console.log('📴 visibilitychange:hidden - attempting final outbox drain and sendBeacon');
+                    try { this.processOutbox(); } catch (e) { /* ignore */ }
+                    try {
+                        if (this.currentUser && this.serverUrl && navigator && navigator.sendBeacon) {
+                            const account = this.accounts[this.currentUser] || {};
+                            const email = this.currentUserEmail || account.email || (this.currentUser + '@local');
+                            const url = `${this.serverUrl}/api/accounts/${encodeURIComponent(email)}`;
+                            const blob = new Blob([JSON.stringify(account)], { type: 'application/json' });
+                            navigator.sendBeacon(url, blob);
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+            });
+
+            // pagehide is more reliable on mobile than beforeunload
+            window.addEventListener('pagehide', () => {
+                console.log('pagehide - attempting final outbox drain and sendBeacon');
+                try { this.processOutbox(); } catch (e) { /* ignore */ }
+                try {
+                    if (this.currentUser && this.serverUrl && navigator && navigator.sendBeacon) {
+                        const account = this.accounts[this.currentUser] || {};
+                        const email = this.currentUserEmail || account.email || (this.currentUser + '@local');
+                        const url = `${this.serverUrl}/api/accounts/${encodeURIComponent(email)}`;
+                        const blob = new Blob([JSON.stringify(account)], { type: 'application/json' });
+                        navigator.sendBeacon(url, blob);
+                    }
+                } catch (e) { /* ignore */ }
+            });
+        } catch (e) {
+            console.warn('⚠️ Failed to install mobile reliability handlers', e);
+        }
+    }
+
+    // Enable safe server sync: performs a health check, drains the outbox and
+    // optionally fetches server data only if there are no local accounts.
+    async enableServerSync({ fetchServerIfNoLocal = true } = {}) {
+        if (!this.serverUrl) {
+            console.warn('⚠️ enableServerSync: no serverUrl configured');
             return false;
         }
+
+        try {
+            const health = await fetch(`${this.serverUrl}/api/health`, { method: 'GET' });
+            if (!health.ok) {
+                console.warn('⚠️ Server health check failed:', health.status);
+                return false;
+            }
+            console.log('✅ Server reachable, draining outbox now');
+
+            // Drain outbox first (sends queued per-account updates)
+            await this.processOutbox();
+
+            // If no local accounts and allowed, pull server data (safe path)
+            if (fetchServerIfNoLocal) {
+                const hasLocal = this.accounts && Object.keys(this.accounts).length > 0;
+                if (!hasLocal) {
+                    try {
+                        const resp = await fetch(`${this.serverUrl}/api/accounts`, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            if (data && data.success && data.accounts) {
+                                this.accounts = Object.assign({}, data.accounts);
+                                try { localStorage.setItem('tetrisAccounts', JSON.stringify(this.accounts)); } catch (e) {}
+                                console.log('🔄 Server accounts pulled into local storage (no local accounts existed)');
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('⚠️ Failed to fetch server accounts:', e);
+                    }
+                } else {
+                    console.log('ℹ️ Local accounts exist — skipping server pull to avoid overwriting');
+                }
+            }
+
+            console.log('✅ enableServerSync completed');
+            return true;
+        } catch (error) {
+            console.warn('⚠️ enableServerSync failed:', error);
+            return false;
+        }
+    }
+
+    // Create a floating button UI that allows the user to force a sync and inspect the outbox
+    createOutboxButton() {
+        if (document.getElementById('force-sync-btn')) return;
+        const btn = document.createElement('button');
+        btn.id = 'force-sync-btn';
+        btn.textContent = 'Forcer sync';
+        btn.title = 'Forcer la synchronisation des comptes (affiche outbox)';
+        Object.assign(btn.style, {
+            position: 'fixed',
+            right: '12px',
+            bottom: '12px',
+            zIndex: 99999,
+            padding: '8px 10px',
+            background: '#0b74de',
+            color: '#fff',
+            border: 'none',
+            borderRadius: '6px',
+            boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+            cursor: 'pointer',
+            fontSize: '14px'
+        });
+
+        btn.addEventListener('click', async () => {
+            try {
+                console.log('🔁 Forcer vidage outbox...');
+                await this.processOutbox();
+                // show outbox contents
+                indexedDB.open('TetrisDB').onsuccess = e => {
+                    const db = e.target.result;
+                    const tx = db.transaction('outbox','readonly');
+                    const store = tx.objectStore('outbox');
+                    store.getAll().onsuccess = ev => {
+                        const items = ev.target.result || [];
+                        if (items.length === 0) {
+                            alert('Outbox vide — tout est synchronisé (ou en attente du serveur).');
+                        } else {
+                            console.log('Outbox items:', items);
+                            alert('Outbox contient ' + items.length + ' élément(s). Voir la console pour détails.');
+                        }
+                    };
+                };
+            } catch (err) {
+                console.warn('⚠️ Erreur lors du forçage de vidage outbox:', err);
+                alert('Erreur lors du forçage (voir console)');
+            }
+        });
+
+        document.body.appendChild(btn);
+
+        // Update button label with count periodically
+        setInterval(() => {
+            try {
+                indexedDB.open('TetrisDB').onsuccess = e => {
+                    const db = e.target.result;
+                    const tx = db.transaction('outbox','readonly');
+                    const store = tx.objectStore('outbox');
+                    store.count().onsuccess = ev => {
+                        const c = ev.target.result || 0;
+                        btn.textContent = c > 0 ? `Forcer sync (${c})` : 'Forcer sync';
+                    };
+                };
+            } catch (e) { /* ignore */ }
+        }, 3000);
+    }
+
+    // Synchroniser avec le serveur (DISABLED - LOCAL-ONLY mode)
+    async syncWithServer() {
+        console.warn('⚠️ syncWithServer disabled (LOCAL-ONLY mode). Use "Forcer sync" button to manually sync.');
+        return;
+    }
+
+    // Envoyer les comptes au serveur (DISABLED - LOCAL-ONLY mode)
+    async syncToServer() {
+        console.warn('⚠️ syncToServer disabled (LOCAL-ONLY mode). Use "Forcer sync" button for manual sync.');
+        return;
+    }
+
+    // Synchroniser un compte spécifique avec le backend (DISABLED AUTO - queue only)
+    async syncAccountToServer() {
+        if (!this.currentUserEmail || !this.currentUser) return false;
+        // Queue for manual sync only - no auto-sync
+        const account = this.accounts[this.currentUser];
+        const email = this.currentUserEmail || account.email || (this.currentUser + '@local');
+        this.enqueueOutbox({ type: 'account_update', email: email, payload: account });
+        console.log('📥 Compte queued in outbox (use "Forcer sync" button to send)');
+        return true;
     }
 
 

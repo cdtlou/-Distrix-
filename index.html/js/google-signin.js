@@ -158,19 +158,44 @@ async function verifyGoogleTokenWithBackend(token, email, pseudo, code) {
             throw new Error(data.message || 'Vérification échouée');
         }
 
-        console.log('✅✅ Token vérifié et compte chargé du serveur');
-        
-        const serverAccount = data.account;
-        
         // Mettre à jour l'email dans le système de comptes
         window.accountSystem.currentUserEmail = email;
         
-        // Charger ou mettre à jour le compte localement
-        window.accountSystem.accounts[pseudo] = serverAccount;
-        window.accountSystem.currentUser = pseudo;
-        window.accountSystem.saveCurrentSession();
+        // 🔥 RAILWAY-ONLY: Load account from Railway backend
+        let account = await window.accountSystem.loadAccountFromRailway(email);
         
-        console.log('📦 Compte chargé depuis serveur, préparation connexion...');
+        // If not on Railway, create new account
+        if (!account) {
+            console.log(`ℹ️ Nouveau compte: créer sur Railway`);
+            account = {
+                pseudo: pseudo,
+                code: code,
+                email: email,
+                googleSub: code,
+                xp: 0,
+                level: 1,
+                bestScore: 0,
+                ownedItems: { skins: [0], musics: [0] },
+                equippedSkin: 0,
+                equippedMusic: 0,
+                musicVolume: 100,
+                effectsVolume: 100,
+                controls: { left: 'a', right: 'd', rotate: 'w', down: 's', hardDrop: ' ' },
+                createdAt: new Date().toISOString(),
+                lastLogin: new Date().toISOString()
+            };
+        } else {
+            // Update lastLogin timestamp
+            account.lastLogin = new Date().toISOString();
+        }
+
+        window.accountSystem.accounts[pseudo] = account;
+        window.accountSystem.currentUser = pseudo;
+        
+        // 🔥 Immediately save to Railway (ONLY destination)
+        window.accountSystem.saveAccounts();
+        
+        console.log('📦 Compte syncronisé avec Railway, préparation connexion...');
         proceedWithLogin(pseudo, code, email);
         
     } catch (error) {
@@ -185,7 +210,7 @@ async function verifyGoogleTokenWithBackend(token, email, pseudo, code) {
 // Procéder avec la connexion (version local fallback)
 async function proceedWithLoginLocal(pseudo, code, email) {
     try {
-        console.log('📝 Création de compte (mode local)...');
+        console.log('📝 Création de compte (mode local + Railway)...');
         const createResult = window.accountSystem.createAccount(pseudo, code);
         
         if (createResult.success) {
@@ -200,6 +225,9 @@ async function proceedWithLoginLocal(pseudo, code, email) {
         }
         
         window.accountSystem.currentUserEmail = email;
+        
+        // 🔥 RAILWAY-ONLY: Always save to Railway
+        window.accountSystem.saveAccounts();
         
         // Connexion
         console.log('🔓 Connexion au compte...');
