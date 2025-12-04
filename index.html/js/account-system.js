@@ -912,5 +912,7 @@ class AccountSystem {
     }
 }
 
-// Instance globale
+// Instance globale - attacher à window pour être accessible partout
 const accountSystem = new AccountSystem();
+window.accountSystem = accountSystem;
+console.log('✅ accountSystem attaché à window');
