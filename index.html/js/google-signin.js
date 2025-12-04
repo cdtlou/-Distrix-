@@ -70,58 +70,114 @@ function handleGoogleSignIn(response) {
 // Créer ou connecter un compte automatiquement avec les données Google
 function createOrLoginGoogleAccount(googleData) {
     try {
-        console.log('🎮 === DÉBUT CRÉATION/CONNEXION ===');
+        console.log('🎮 === DÉBUT CRÉATION/CONNEXION GOOGLE ===');
         
-        // Utiliser l'email comme pseudo (avant le @)
         const pseudo = googleData.email.split('@')[0];
-        const code = googleData.sub; // Google User ID unique comme code
+        const code = googleData.sub;
+        const email = googleData.email;
+        const token = googleData.credential || googleData.id_token; // Token Google complet
         
+        console.log(`   Email: ${email}`);
         console.log(`   Pseudo: ${pseudo}`);
-        console.log(`   Code: ${code}`);
         
-        // Vérifier accountSystem
-        if (!window.accountSystem) {
-            throw new Error('accountSystem n\'est pas chargé');
-        }
+        if (!window.accountSystem) throw new Error('accountSystem n\'est pas chargé');
         console.log('✅ accountSystem prêt');
         
-        // Vérifier uiManager
-        if (!window.uiManager) {
-            throw new Error('uiManager n\'est pas chargé');
-        }
+        if (!window.uiManager) throw new Error('uiManager n\'est pas chargé');
         console.log('✅ uiManager prêt');
         
-        // Créer le compte
-        console.log('📝 Création de compte...');
+        // Étape 1: Vérifier le token avec le backend
+        console.log('🔐 Vérification du token avec le serveur...');
+        verifyGoogleTokenWithBackend(token, email, pseudo, code);
+        
+    } catch (error) {
+        console.error('❌ ERREUR CRÉATION/CONNEXION:', error.message);
+        showLoginError(`Erreur: ${error.message}`);
+    }
+}
+
+// Vérifier le token Google avec le backend
+async function verifyGoogleTokenWithBackend(token, email, pseudo, code) {
+    try {
+        const serverUrl = window.accountSystem.serverUrl;
+        
+        const response = await fetch(`${serverUrl}/api/auth/verify-google`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Erreur serveur: ${response.status}`);
+        }
+
+        const data = await response.json();
+        
+        if (!data.success) {
+            throw new Error(data.message || 'Vérification échouée');
+        }
+
+        console.log('✅✅ Token vérifié et compte chargé du serveur');
+        
+        const serverAccount = data.account;
+        
+        // Mettre à jour l'email dans le système de comptes
+        window.accountSystem.currentUserEmail = email;
+        
+        // Charger ou mettre à jour le compte localement
+        window.accountSystem.accounts[pseudo] = serverAccount;
+        window.accountSystem.currentUser = pseudo;
+        window.accountSystem.saveCurrentSession();
+        
+        console.log('📦 Compte chargé depuis serveur, préparation connexion...');
+        proceedWithLogin(pseudo, code, email);
+        
+    } catch (error) {
+        console.error('❌ Erreur vérification backend:', error.message);
+        // Fallback: créer le compte localement même si serveur indisponible
+        console.log('⚠️ Fallback local (serveur indisponible)');
+        proceedWithLoginLocal(pseudo, code, email);
+    }
+}
+
+// Procéder avec la connexion (version local fallback)
+async function proceedWithLoginLocal(pseudo, code, email) {
+    try {
+        console.log('📝 Création de compte (mode local)...');
         const createResult = window.accountSystem.createAccount(pseudo, code);
         
         if (createResult.success) {
             console.log(`✅ Nouveau compte créé: ${pseudo}`);
+            window.accountSystem.accounts[pseudo].email = email;
+            window.accountSystem.accounts[pseudo].googleSub = code;
         } else {
             console.log(`ℹ️ Compte existe déjà: ${pseudo}`);
+            if (!window.accountSystem.accounts[pseudo].email) {
+                window.accountSystem.accounts[pseudo].email = email;
+            }
         }
         
-        // Connecter
+        window.accountSystem.currentUserEmail = email;
+        
+        // Connexion
         console.log('🔓 Connexion au compte...');
         const loginResult = window.accountSystem.login(pseudo, code);
         
-        if (loginResult.success) {
-            console.log(`✅✅ Connexion réussie: ${pseudo}`);
-            
-            // Attendre un peu et rediriger
-            console.log('📍 Préparation redirection...');
-            setTimeout(() => {
-                console.log('📍 Redirection au lobby en cours...');
-                window.uiManager.showPage('lobbyPage');
-                window.uiManager.updateLobbyDisplay();
-                console.log('✅✅✅ REDIRECTION COMPLÈTE - Bienvenue au jeu!');
-            }, 300);
-        } else {
+        if (!loginResult.success) {
             throw new Error(`Connexion échouée: ${loginResult.message}`);
         }
+        
+        console.log(`✅✅ Connexion réussie: ${pseudo}`);
+        
+        // Redirection
+        setTimeout(() => {
+            console.log('📍 Redirection au lobby...');
+            window.uiManager.showPage('lobbyPage');
+            window.uiManager.updateLobbyDisplay();
+            console.log('✅✅✅ REDIRECTION COMPLÈTE - Bienvenue!');
+        }, 300);
     } catch (error) {
-        console.error('❌ ERREUR CRÉATION/CONNEXION:', error.message);
-        console.error('Stack:', error.stack);
+        console.error('❌ ERREUR:', error.message);
         showLoginError(`Erreur: ${error.message}`);
     }
 }

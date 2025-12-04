@@ -164,10 +164,57 @@ class UIManager {
     }
 
     logout() {
+        // Récupérer l'utilisateur courant avant la déconnexion
+        const currentPseudo = accountSystem.currentUser;
+        const currentAccount = currentPseudo ? accountSystem.accounts[currentPseudo] : null;
+        const googleIdToRevoke = currentAccount ? (currentAccount.googleSub || currentAccount.code) : null;
+
+        // Effectuer la déconnexion locale
         accountSystem.logout();
         document.getElementById('pseudoInput').value = '';
         document.getElementById('codeInput').value = '';
+
+        // Retourner à la page de connexion
         this.showPage('loginPage');
+
+        // Effacer les messages d'erreur éventuels
+        const errorDiv = document.getElementById('loginError');
+        if (errorDiv) {
+            errorDiv.textContent = '';
+            errorDiv.style.display = 'none';
+        }
+
+        // Essayer d'annuler/stopper le One-Tap et désactiver l'auto-select immédiatement
+        try {
+            if (window.google && window.google.accounts && window.google.accounts.id) {
+                const gid = window.google.accounts.id;
+
+                // Annuler tout One-Tap déjà affiché
+                if (typeof gid.cancel === 'function') gid.cancel();
+
+                // Empêcher la sélection automatique du compte précédemment utilisé
+                if (typeof gid.disableAutoSelect === 'function') gid.disableAutoSelect();
+
+                // Tenter de révoquer l'accès pour empêcher une reconnexion automatique (optionnel)
+                if (googleIdToRevoke && typeof gid.revoke === 'function') {
+                    try {
+                        gid.revoke(googleIdToRevoke, (done) => {
+                            console.log('🔒 Google revoke callback:', done);
+                            // Après révocation, demander le prompt pour choisir un compte
+                            if (typeof gid.prompt === 'function') gid.prompt();
+                        });
+                    } catch (e) {
+                        console.warn('⚠️ Erreur lors du revoke Google:', e);
+                        if (typeof gid.prompt === 'function') gid.prompt();
+                    }
+                } else {
+                    // Si pas de revoke possible, simplement demander le prompt
+                    if (typeof gid.prompt === 'function') gid.prompt();
+                }
+            }
+        } catch (err) {
+            console.warn('⚠️ Impossible d'appeler Google Identity API lors de la déconnexion:', err);
+        }
     }
 
     showError(message, type = 'error') {

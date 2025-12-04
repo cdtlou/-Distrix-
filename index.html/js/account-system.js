@@ -1,20 +1,36 @@
 // ============ SYSTÈME DE COMPTES AVEC SYNCHRONISATION SERVEUR ============
 class AccountSystem {
     constructor() {
-        this.accounts = {};
-        this.currentUser = null;
-        // URL du serveur de synchronisation (par défaut en local)
-        this.serverUrl = 'http://localhost:3000';
+        try {
+            this.accounts = {};
+            this.currentUser = null;
+            this.currentUserEmail = null; // Stocker l'email Google
+            // URL du serveur de synchronisation (Railway déployé)
+            // Remplacez par l'URL fournie par Railway. Exemple: https://caboose.proxy.rlwy.net
+            this.serverUrl = 'https://caboose.proxy.rlwy.net'; // Railway proxy URL fournie par l'utilisateur
+            // Fallback local pour développement
+            if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                this.serverUrl = 'http://localhost:3000';
+            }
+            
+            // Charger les comptes depuis localStorage, backup, ou IndexedDB
+            this.initializeStorage();
         
-        // Charger les comptes depuis localStorage, backup, ou IndexedDB
-        this.initializeStorage();
-        
-        // Sauvegarde automatique toutes les 5 secondes
-        this.startAutoSave();
-        // Synchronisation entre onglets/fenêtres (même PC/mobile)
-        this.setupStorageSync();
-        // Synchroniser avec le serveur au démarrage
-        this.syncWithServer();
+            // Sauvegarde automatique toutes les 5 secondes
+            this.startAutoSave();
+            // Synchronisation entre onglets/fenêtres (même PC/mobile)
+            this.setupStorageSync();
+            // Synchroniser avec le serveur au démarrage
+            this.syncWithServer();
+            
+            console.log('✅ AccountSystem initialisé avec succès');
+            console.log(`📡 Backend: ${this.serverUrl}`);
+
+        } catch (error) {
+            console.error('❌ Erreur initialisation AccountSystem:', error);
+            console.error('Stack:', error.stack);
+            // Continuer quand même - on aura au moins les methods
+        }
     }
 
     // Initialiser le stockage avec fallback en cas d'erreur
@@ -26,6 +42,8 @@ class AccountSystem {
                 this.accounts = JSON.parse(mainData);
                 this.currentUser = localStorage.getItem('tetrisCurrentUser');
                 console.log('✅ Comptes chargés depuis localStorage');
+                // Signaler que les comptes sont prêts (synchrones)
+                try { window.dispatchEvent(new CustomEvent('accounts-ready')); } catch (e) {}
                 return;
             } catch (error) {
                 console.warn('⚠️ Erreur parse localStorage, essai du backup...');
@@ -41,6 +59,8 @@ class AccountSystem {
                 // Restaurer le principal depuis le backup
                 localStorage.setItem('tetrisAccounts', backupData);
                 console.log('✅ Comptes restaurés depuis le backup localStorage');
+                // Signaler que les comptes sont prêts (synchrones)
+                try { window.dispatchEvent(new CustomEvent('accounts-ready')); } catch (e) {}
                 return;
             } catch (error) {
                 console.warn('⚠️ Erreur parse backup localStorage...');
@@ -66,6 +86,8 @@ class AccountSystem {
             
             // Après avoir chargé les comptes, migrer les anciens pour être compatibles
             this.migrateOldAccounts();
+            // Signaler que les comptes sont prêts (après la migration async)
+            try { window.dispatchEvent(new CustomEvent('accounts-ready')); } catch (e) {}
         });
     }
 
@@ -257,6 +279,40 @@ class AccountSystem {
         return updateCount;
     }
 
+    // Récupérer un compte par email depuis IndexedDB (pour retrouver après effacement localStorage)
+    async getAccountByEmailFromIndexedDB(email) {
+        return new Promise((resolve) => {
+            try {
+                const request = indexedDB.open('TetrisDB', 1);
+                
+                request.onerror = () => {
+                    console.warn('⚠️ IndexedDB non disponible');
+                    resolve(null);
+                };
+                
+                request.onsuccess = (event) => {
+                    const db = event.target.result;
+                    const transaction = db.transaction(['accountsByEmail'], 'readonly');
+                    const store = transaction.objectStore('accountsByEmail');
+                    const getRequest = store.get(email);
+                    
+                    getRequest.onsuccess = () => {
+                        if (getRequest.result) {
+                            console.log(`✅ Compte retrouvé dans IndexedDB pour ${email}`);
+                            resolve(getRequest.result);
+                        } else {
+                            resolve(null);
+                        }
+                    };
+                    getRequest.onerror = () => resolve(null);
+                };
+            } catch (error) {
+                console.warn('⚠️ Erreur lors de la récupération du compte:', error);
+                resolve(null);
+            }
+        });
+    }
+
     // Charger depuis IndexedDB
     async loadFromIndexedDB() {
         return new Promise((resolve) => {
@@ -285,6 +341,10 @@ class AccountSystem {
                     if (!db.objectStoreNames.contains('accounts')) {
                         db.createObjectStore('accounts');
                     }
+                    // Store individual accounts by email for easy retrieval after localStorage clear
+                    if (!db.objectStoreNames.contains('accountsByEmail')) {
+                        db.createObjectStore('accountsByEmail'); // key: email, value: account
+                    }
                 };
             } catch (error) {
                 console.warn('⚠️ Erreur IndexedDB:', error);
@@ -300,13 +360,23 @@ class AccountSystem {
             
             request.onsuccess = (event) => {
                 const db = event.target.result;
-                const transaction = db.transaction(['accounts'], 'readwrite');
-                const store = transaction.objectStore('accounts');
-                store.put({
+                const transaction = db.transaction(['accounts', 'accountsByEmail'], 'readwrite');
+                const mainStore = transaction.objectStore('accounts');
+                const emailStore = transaction.objectStore('accountsByEmail');
+                
+                // Save main data
+                mainStore.put({
                     accounts: this.accounts,
                     currentUser: this.currentUser,
                     timestamp: new Date().toISOString()
                 }, 'data');
+                
+                // Save each account individually by email for easy retrieval
+                for (const pseudo in this.accounts) {
+                    const account = this.accounts[pseudo];
+                    const email = account.email || pseudo + '@local'; // Use stored email or fallback
+                    emailStore.put(account, email);
+                }
             };
         } catch (error) {
             console.warn('⚠️ Erreur sauvegarde IndexedDB:', error);
@@ -411,6 +481,12 @@ class AccountSystem {
     // Envoyer les comptes au serveur
     async syncToServer() {
         try {
+            // Ne pas synchroniser si aucun compte en mémoire (évite d'écraser le serveur)
+            if (!this.accounts || Object.keys(this.accounts).length === 0) {
+                console.log('ℹ️ syncToServer: aucun compte local à synchroniser — skip');
+                return;
+            }
+
             const response = await fetch(`${this.serverUrl}/api/accounts`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -429,6 +505,33 @@ class AccountSystem {
             window.dispatchEvent(new CustomEvent('sync-status', { detail: 'error' }));
         }
     }
+
+    // Synchroniser un compte spécifique avec le backend (après Google login)
+    async syncAccountToServer() {
+        if (!this.currentUserEmail || !this.currentUser) return;
+        
+        try {
+            const user = this.accounts[this.currentUser];
+            const response = await fetch(`${this.serverUrl}/api/accounts/${encodeURIComponent(this.currentUserEmail)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(user)
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                console.log('✅ Compte synchronisé avec serveur:', this.currentUserEmail);
+                return true;
+            } else {
+                console.warn('⚠️ Erreur lors de la sync serveur:', response.status);
+                return false;
+            }
+        } catch (error) {
+            console.warn('⚠️ Impossible de synchroniser (serveur indisponible):', error);
+            return false;
+        }
+    }
+
 
     // Synchronisation entre onglets/fenêtres (si on ouvre plusieurs onglets)
     setupStorageSync() {
@@ -463,6 +566,8 @@ class AccountSystem {
         this.accounts[pseudo] = {
             pseudo: pseudo,
             code: code,
+            email: null, // Will be filled by Google Sign-In (e.g., user@gmail.com)
+            googleSub: code, // Store Google user ID for account recovery
             xp: 0,
             level: 1,
             bestScore: 0,
@@ -556,10 +661,13 @@ class AccountSystem {
     }
 
     logout() {
+        // Se déconnecter localement sans forcer une resynchronisation complète
+        // (évite d'écraser les données serveur par erreur)
+        console.log('🔒 Déconnexion en cours - comptes en mémoire:', Object.keys(this.accounts).length);
         this.currentUser = null;
         this.saveCurrentSession();
-        this.saveAccounts();
-        console.log('✅ Déconnexion réussie');
+        // Ne PAS appeler this.saveAccounts() ici pour éviter toute écriture involontaire au serveur
+        console.log('✅ Déconnexion locale réussie (session locale effacée)');
     }
 
     getCurrentUser() {
@@ -587,6 +695,11 @@ class AccountSystem {
         }
         
         this.saveAccounts(); // Sauvegarde IMMÉDIATE
+        
+        // Synchroniser avec le backend si email Google est disponible
+        if (this.currentUserEmail) {
+            this.syncAccountToServer();
+        }
     }
 
     updateBestScore(score) {
@@ -596,6 +709,11 @@ class AccountSystem {
         if (score > user.bestScore) {
             user.bestScore = score;
             this.saveAccounts(); // Sauvegarde IMMÉDIATE
+            
+            // Synchroniser avec le backend si email Google
+            if (this.currentUserEmail) {
+                this.syncAccountToServer();
+            }
             return true;
         }
         return false;
