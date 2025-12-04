@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Connexion Google</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;text-align:center;padding:2rem}</style>
+</head>
+<body>
+  <h1>Connexion réussie !</h1>
+  <p>Vous pouvez fermer cette page.</p>
+
+  <script>
+    console.log("Page callback chargée !");
+    console.log("URL :", window.location.href);
+
+    // Si Google renvoie les paramètres dans l'URL (ex: code), on les affiche pour debug
+    try {
+      const params = new URLSearchParams(window.location.search);
+      console.log('Search params:', Object.fromEntries(params.entries()));
+    } catch (e) {
+      console.warn('Impossible de lire les params:', e);
+    }
+  </script>
+</body>
+</html>
