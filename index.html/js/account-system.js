@@ -1060,6 +1060,26 @@ class AccountSystem {
             .map(user => ({ pseudo: user.pseudo, score: user.bestScore }));
     }
 
+    // Fetch top scores from the server (falls back to local getTopScores on error)
+    async fetchTopScores(limit = 3) {
+        try {
+            if (!this.serverUrl) throw new Error('serverUrl missing');
+            const resp = await fetch(`${this.serverUrl}/api/accounts`, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+            if (!resp.ok) throw new Error('server responded ' + resp.status);
+            const data = await resp.json();
+            // `data.accounts` is expected to be an object keyed by email -> account
+            const accountsObj = data && data.accounts ? data.accounts : {};
+            const list = Object.values(accountsObj)
+                .map(a => ({ pseudo: a.pseudo || (a.email ? a.email.split('@')[0] : 'anon'), score: a.bestScore || 0 }))
+                .sort((a, b) => b.score - a.score)
+                .slice(0, limit);
+            return list;
+        } catch (err) {
+            console.warn('⚠️ fetchTopScores failed, falling back to local:', err);
+            return this.getTopScores(limit);
+        }
+    }
+
     buyItem(itemType, itemIndex) {
         if (!this.currentUser) return { success: false, message: 'Utilisateur non connecté' };
         
