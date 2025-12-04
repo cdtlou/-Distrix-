@@ -357,20 +357,30 @@ class AccountSystem {
     async saveToIndexedDB() {
         try {
             const request = indexedDB.open('TetrisDB', 1);
-            
+
+            request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                if (!db.objectStoreNames.contains('accounts')) {
+                    db.createObjectStore('accounts');
+                }
+                if (!db.objectStoreNames.contains('accountsByEmail')) {
+                    db.createObjectStore('accountsByEmail');
+                }
+            };
+
             request.onsuccess = (event) => {
                 const db = event.target.result;
                 const transaction = db.transaction(['accounts', 'accountsByEmail'], 'readwrite');
                 const mainStore = transaction.objectStore('accounts');
                 const emailStore = transaction.objectStore('accountsByEmail');
-                
+
                 // Save main data
                 mainStore.put({
                     accounts: this.accounts,
                     currentUser: this.currentUser,
                     timestamp: new Date().toISOString()
                 }, 'data');
-                
+
                 // Save each account individually by email for easy retrieval
                 for (const pseudo in this.accounts) {
                     const account = this.accounts[pseudo];
@@ -445,9 +455,9 @@ class AccountSystem {
             console.error('❌ Erreur lors de la vérification:', error);
         }
         
-        // Synchroniser avec le serveur en arrière-plan
-        if (this.serverUrl) {
-            this.syncToServer();
+        // Synchroniser le compte courant avec le serveur (plus sûr que l'envoi bulk)
+        if (this.serverUrl && this.currentUser && this.currentUserEmail) {
+            this.syncAccountToServer();
         }
     }
 
@@ -499,6 +509,10 @@ class AccountSystem {
             if (response.ok) {
                 console.log('📤 Données synchronisées avec le serveur');
                 window.dispatchEvent(new CustomEvent('sync-status', { detail: 'synced' }));
+            } else {
+                const txt = await response.text().catch(() => null);
+                console.error('⚠️ syncToServer failed:', response.status, txt);
+                window.dispatchEvent(new CustomEvent('sync-status', { detail: 'error' }));
             }
         } catch (error) {
             // Silencieux - le serveur n'est peut-être pas disponible
@@ -523,7 +537,8 @@ class AccountSystem {
                 console.log('✅ Compte synchronisé avec serveur:', this.currentUserEmail);
                 return true;
             } else {
-                console.warn('⚠️ Erreur lors de la sync serveur:', response.status);
+                const txt = await response.text().catch(() => null);
+                console.warn('⚠️ Erreur lors de la sync serveur:', response.status, txt);
                 return false;
             }
         } catch (error) {

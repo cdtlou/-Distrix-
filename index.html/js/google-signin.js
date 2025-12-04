@@ -58,7 +58,8 @@ function handleGoogleSignIn(response) {
         
         // Attendre que les systèmes soient chargés, PUIS créer/connecter
         waitForSystems(() => {
-            createOrLoginGoogleAccount(decoded);
+            // Passer aussi le token brut (response.credential) au handler
+            createOrLoginGoogleAccount(decoded, token);
         });
         
     } catch (error) {
@@ -68,14 +69,15 @@ function handleGoogleSignIn(response) {
 }
 
 // Créer ou connecter un compte automatiquement avec les données Google
-function createOrLoginGoogleAccount(googleData) {
+function createOrLoginGoogleAccount(googleData, rawToken) {
     try {
         console.log('🎮 === DÉBUT CRÉATION/CONNEXION GOOGLE ===');
         
         const pseudo = googleData.email.split('@')[0];
         const code = googleData.sub;
         const email = googleData.email;
-        const token = googleData.credential || googleData.id_token; // Token Google complet
+        // Prefer explicit rawToken passed from handleGoogleSignIn (contains the id_token)
+        const token = rawToken || googleData.credential || googleData.id_token; // Token Google complet
         
         console.log(`   Email: ${email}`);
         console.log(`   Pseudo: ${pseudo}`);
@@ -108,10 +110,49 @@ async function verifyGoogleTokenWithBackend(token, email, pseudo, code) {
         });
 
         if (!response.ok) {
-            throw new Error(`Erreur serveur: ${response.status}`);
+            const bodyText = await response.text().catch(() => null);
+            console.error('❌ verifyGoogleTokenWithBackend non-ok response:', response.status, bodyText);
+            throw new Error(`Erreur serveur: ${response.status}${bodyText ? ' - ' + bodyText : ''}`);
         }
 
         const data = await response.json();
+        const maxRetries = 3;
+        let attempt = 0;
+        let lastError = null;
+
+        while (attempt < maxRetries) {
+            try {
+                attempt++;
+                const response = await fetch(`${serverUrl}/api/auth/verify-google`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token })
+                });
+
+                if (!response.ok) {
+                    const bodyText = await response.text().catch(() => null);
+                    console.error('❌ verifyGoogleTokenWithBackend non-ok response:', response.status, bodyText);
+                    throw new Error(`Erreur serveur: ${response.status}${bodyText ? ' - ' + bodyText : ''}`);
+                }
+
+                const data = await response.json();
+                // success -> break loop
+                lastError = null;
+                // proceed with success handling below
+                // set data to a temp var via closure
+                verifyGoogleTokenWithBackend._lastData = data;
+                break;
+            } catch (err) {
+                lastError = err;
+                console.warn(`🔁 verify-google attempt ${attempt} failed:`, err.message);
+                // small delay before retry
+                await new Promise(r => setTimeout(r, 600 * attempt));
+            }
+        }
+
+        if (lastError) {
+            throw lastError;
+        }
         
         if (!data.success) {
             throw new Error(data.message || 'Vérification échouée');
@@ -136,6 +177,7 @@ async function verifyGoogleTokenWithBackend(token, email, pseudo, code) {
         console.error('❌ Erreur vérification backend:', error.message);
         // Fallback: créer le compte localement même si serveur indisponible
         console.log('⚠️ Fallback local (serveur indisponible)');
+        showLoginError('Erreur vérification serveur: ' + (error.message || 'Erreur inconnue'));
         proceedWithLoginLocal(pseudo, code, email);
     }
 }

@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
+import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -54,22 +55,44 @@ function saveAccounts(accounts) {
             const backupPath = path.join(backupsDir, `accounts-${timestamp}.json`);
             if (fs.existsSync(dbPath)) {
                 fs.copyFileSync(dbPath, backupPath);
+                // compute checksum for backup
+                try {
+                    const data = fs.readFileSync(backupPath);
+                    const sum = crypto.createHash('sha256').update(data).digest('hex');
+                    fs.writeFileSync(backupPath + '.sha256', sum, 'utf-8');
+                } catch (e) {
+                    console.warn('⚠️ Impossible de créer checksum pour backup:', e);
+                }
                 // Supprimer les anciens backups si trop nombreux (garder 10)
                 const files = fs.readdirSync(backupsDir)
-                    .filter(f => f.startsWith('accounts-'))
+                    .filter(f => f.startsWith('accounts-') && f.endsWith('.json'))
                     .map(f => ({ f, t: fs.statSync(path.join(backupsDir, f)).mtime.getTime() }))
                     .sort((a,b) => b.t - a.t);
-                const keep = 10;
+                const keep = 50; // conserver plus de backups
                 files.slice(keep).forEach(old => {
-                    try { fs.unlinkSync(path.join(backupsDir, old.f)); } catch(e){}
+                    try { 
+                        fs.unlinkSync(path.join(backupsDir, old.f)); 
+                        // also remove checksum file if present
+                        try { fs.unlinkSync(path.join(backupsDir, old.f + '.sha256')); } catch(e){}
+                    } catch(e){}
                 });
             }
         } catch (err) {
             console.warn('⚠️ Erreur lors de la création du backup avant save:', err);
         }
 
-        fs.writeFileSync(dbPath, JSON.stringify(accounts, null, 2), 'utf-8');
-        console.log('✅ Comptes sauvegardés (et backup créé)');
+        // Ecriture atomique: écrire dans un fichier temporaire puis renommer
+        const tmpPath = dbPath + '.tmp';
+        try {
+            fs.writeFileSync(tmpPath, JSON.stringify(accounts, null, 2), 'utf-8');
+            fs.renameSync(tmpPath, dbPath);
+            console.log('✅ Comptes sauvegardés (écriture atomique)');
+        } catch (e) {
+            console.error('❌ Erreur écriture atomique DB:', e);
+            // tenter nettoyage du tmp
+            try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch(e){}
+            throw e;
+        }
     } catch (error) {
         console.error('❌ Erreur sauvegarde database:', error);
     }
@@ -179,6 +202,17 @@ app.get('/api/accounts/:email', (req, res) => {
     }
 });
 
+// Endpoint public: retourner tous les comptes (utilisé par le client pour sync initial)
+app.get('/api/accounts', (req, res) => {
+    try {
+        const accounts = loadAccounts();
+        return res.json({ success: true, accounts });
+    } catch (error) {
+        console.error('❌ Erreur lecture comptes (public):', error);
+        return res.status(500).json({ success: false, message: 'Erreur serveur' });
+    }
+});
+
 // Sauvegarder/mettre à jour un compte
 app.post('/api/accounts/:email', (req, res) => {
     try {
@@ -195,6 +229,20 @@ app.post('/api/accounts/:email', (req, res) => {
 
         if (!account) {
             return res.status(404).json({ success: false, message: 'Compte non trouvé' });
+        }
+
+        // If client provided a lastUpdated, ensure it is not older than server's
+        if (updatedData && updatedData.lastUpdated) {
+            try {
+                const incoming = new Date(updatedData.lastUpdated).getTime();
+                const existing = account.lastUpdated ? new Date(account.lastUpdated).getTime() : 0;
+                if (!isNaN(incoming) && incoming < existing) {
+                    console.warn(`⚠️ Rejected update for ${email}: incoming lastUpdated older than server`);
+                    return res.status(409).json({ success: false, message: 'Update rejected: older data' });
+                }
+            } catch (e) {
+                // ignore parse errors and continue
+            }
         }
 
         // Backup avant modification
@@ -231,12 +279,37 @@ app.post('/api/accounts', (req, res) => {
             return res.status(400).json({ success: false, message: 'Payload vide ou invalide' });
         }
 
-        // Charger, fusionner et sauvegarder
+        // Charger, fusionner et sauvegarder (mais refuser/ignorer les mises à jour plus anciennes)
         const accounts = loadAccounts();
-        Object.assign(accounts, data.accounts);
-        saveAccounts(accounts);
+        const incoming = data.accounts || {};
+        let mergedCount = 0;
 
-        res.json({ success: true, message: 'Comptes synchronisés (compat)', totalAccounts: Object.keys(accounts).length });
+        for (const key of Object.keys(incoming)) {
+            const incomingAccount = incoming[key];
+            const existing = accounts[key];
+
+            // If existing and incoming has lastUpdated older than existing, skip
+            if (existing && incomingAccount && incomingAccount.lastUpdated) {
+                try {
+                    const inc = new Date(incomingAccount.lastUpdated).getTime();
+                    const ex = existing.lastUpdated ? new Date(existing.lastUpdated).getTime() : 0;
+                    if (!isNaN(inc) && inc < ex) {
+                        console.warn(`⚠️ Skipping incoming older account for ${key}`);
+                        continue; // skip merging this account
+                    }
+                } catch (e) {
+                    // parse error: fallthrough to merge
+                }
+            }
+
+            accounts[key] = { ...(existing || {}), ...(incomingAccount || {}) };
+            accounts[key].lastUpdated = new Date().toISOString();
+            mergedCount++;
+        }
+
+        if (mergedCount > 0) saveAccounts(accounts);
+
+        res.json({ success: true, message: 'Comptes synchronisés (compat)', totalAccounts: Object.keys(accounts).length, merged: mergedCount });
     } catch (error) {
         console.error('❌ Erreur /api/accounts:', error);
         res.status(500).json({ success: false, message: 'Erreur serveur' });
@@ -370,6 +443,66 @@ app.delete('/api/accounts/:email', (req, res) => {
         return res.json({ success: true, message: 'Compte supprimé' });
     } catch (error) {
         console.error('❌ Erreur suppression compte:', error);
+        return res.status(500).json({ success: false, message: 'Erreur serveur' });
+    }
+});
+
+// --- Admin: lister les backups disponibles (protégé)
+app.get('/api/admin/backups', (req, res) => {
+    try {
+        const token = req.headers['x-admin-token'] || req.query.token || null;
+        if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) {
+            return res.status(403).json({ success: false, message: 'Forbidden: admin token required' });
+        }
+
+        if (!fs.existsSync(backupsDir)) {
+            return res.json({ success: true, backups: [] });
+        }
+
+        const files = fs.readdirSync(backupsDir)
+            .filter(f => f.startsWith('accounts-'))
+            .map(f => ({ file: f, mtime: fs.statSync(path.join(backupsDir, f)).mtime.getTime() }))
+            .sort((a, b) => b.mtime - a.mtime)
+            .map(x => x.file);
+
+        return res.json({ success: true, backups: files });
+    } catch (error) {
+        console.error('❌ Erreur listing backups:', error);
+        return res.status(500).json({ success: false, message: 'Erreur serveur' });
+    }
+});
+
+// --- Admin: restaurer la sauvegarde la plus récente (protégé)
+app.post('/api/admin/restore', (req, res) => {
+    try {
+        const token = req.headers['x-admin-token'] || req.query.token || null;
+        if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) {
+            return res.status(403).json({ success: false, message: 'Forbidden: admin token required' });
+        }
+
+        if (!fs.existsSync(backupsDir)) {
+            return res.status(404).json({ success: false, message: 'Aucune sauvegarde trouvée' });
+        }
+
+        const files = fs.readdirSync(backupsDir)
+            .filter(f => f.startsWith('accounts-'))
+            .map(f => ({ file: f, mtime: fs.statSync(path.join(backupsDir, f)).mtime.getTime() }))
+            .sort((a, b) => b.mtime - a.mtime);
+
+        if (files.length === 0) {
+            return res.status(404).json({ success: false, message: 'Aucune sauvegarde trouvée' });
+        }
+
+        const latest = files[0].file;
+        const backupPath = path.join(backupsDir, latest);
+
+        // Copier le fichier de backup vers la DB principale
+        fs.copyFileSync(backupPath, dbPath);
+        console.log(`♻️ Restauré depuis backup: ${latest}`);
+
+        return res.json({ success: true, message: 'Restauration effectuée', restored: latest });
+    } catch (error) {
+        console.error('❌ Erreur restauration backup:', error);
         return res.status(500).json({ success: false, message: 'Erreur serveur' });
     }
 });
