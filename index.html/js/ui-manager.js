@@ -18,15 +18,20 @@ class UIManager {
     }
 
     setupEventListeners() {
-        // LOGIN PAGE
-        document.getElementById('createBtn').addEventListener('click', () => this.createAccount());
-        document.getElementById('loginBtn').addEventListener('click', () => this.login());
+        // LOGIN PAGE - Les boutons peuvent ne pas exister si on utilise Google-only
+        const createBtn = document.getElementById('createBtn');
+        const loginBtn = document.getElementById('loginBtn');
+        const pseudoInput = document.getElementById('pseudoInput');
+        const codeInput = document.getElementById('codeInput');
+        
+        if (createBtn) createBtn.addEventListener('click', () => this.createAccount());
+        if (loginBtn) loginBtn.addEventListener('click', () => this.login());
         
         // Permettre la connexion avec Entrée
-        document.getElementById('pseudoInput').addEventListener('keypress', (e) => {
+        if (pseudoInput) pseudoInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this.login();
         });
-        document.getElementById('codeInput').addEventListener('keypress', (e) => {
+        if (codeInput) codeInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this.login();
         });
 
@@ -719,5 +724,20 @@ class UIManager {
     }
 }
 
-// Instance globale
-const uiManager = new UIManager();
+// Instance globale - avec gestion des erreurs
+let uiManager;
+try {
+    console.log('🚀 Création de UIManager...');
+    uiManager = new UIManager();
+    window.uiManager = uiManager;
+    console.log('✅ UIManager créé avec succès');
+} catch (error) {
+    console.error('❌ Erreur création UIManager:', error);
+    // Créer un objet dummy pour éviter les crashes
+    window.uiManager = {
+        showPage: () => console.warn('UIManager non disponible'),
+        updateLobbyDisplay: () => console.warn('UIManager non disponible'),
+        createAccount: () => console.warn('UIManager non disponible'),
+        login: () => console.warn('UIManager non disponible')
+    };
+}
