@@ -1,35 +1,11 @@
 // ============ GOOGLE SIGN-IN INTEGRATION ============
 
-// Attendre que les systèmes clés soient chargés
-function waitForSystems(callback, maxRetries = 200) {
-    const hasAccountSystem = window.accountSystem && typeof window.accountSystem.login === 'function';
-    const hasUIManager = window.uiManager && typeof window.uiManager.showPage === 'function';
-    
-    if (hasAccountSystem && hasUIManager) {
-        console.log('✅ Tous les systèmes sont chargés et prêts!');
-        callback();
-    } else if (maxRetries > 0) {
-        if (maxRetries % 40 === 0) {
-            console.log(`⏳ Attente... AS:${hasAccountSystem} UI:${hasUIManager} (${200-maxRetries*25}ms)`);
-        }
-        setTimeout(() => waitForSystems(callback, maxRetries - 1), 25);
-    } else {
-        console.error('❌ Timeout: Les systèmes ne se sont pas chargés après 5s');
-        console.error('   window.accountSystem:', typeof window.accountSystem);
-        console.error('   window.uiManager:', typeof window.uiManager);
-        console.error('   All window keys:', Object.keys(window).filter(k => !k.startsWith('webkit')).slice(0, 20));
-        showLoginError('Erreur: Impossible de charger le jeu. Recharge la page.');
-    }
-}
-
-// Callback pour Google Sign-In (one-tap ou button)
+// Callback pour Google Sign-In
 function handleGoogleSignIn(response) {
     console.log('🔐 Google Sign-In callback reçu');
-    console.log('Response:', response);
     
-    if (!response || !response.credential) {
-        console.error('❌ Pas de token Google ou response invalide');
-        showLoginError('Erreur: pas de réponse Google');
+    if (!response.credential) {
+        console.error('❌ Pas de token Google');
         return;
     }
 
@@ -39,232 +15,72 @@ function handleGoogleSignIn(response) {
     
     if (parts.length !== 3) {
         console.error('❌ Format de token invalide');
-        showLoginError('Erreur: format token invalide');
         return;
     }
 
     // Décoder le payload (partie 2)
     try {
-        // Ajouter du padding si nécessaire pour base64
-        let payload = parts[1];
-        payload += '=='.substring(0, (4 - payload.length % 4) % 4);
+        const payload = JSON.parse(atob(parts[1]));
         
-        const decoded = JSON.parse(atob(payload));
+        console.log('✅ Données Google reçues:');
+        console.log('   - Email:', payload.email);
+        console.log('   - Name:', payload.name);
+        console.log('   - Picture:', payload.picture);
         
-        console.log('✅ Données Google décodées:');
-        console.log('   - Email:', decoded.email);
-        console.log('   - Name:', decoded.name);
-        console.log('   - Sub (ID):', decoded.sub);
-        
-        // Attendre que les systèmes soient chargés, PUIS créer/connecter
-        waitForSystems(() => {
-            // Passer aussi le token brut (response.credential) au handler
-            createOrLoginGoogleAccount(decoded, token);
-        });
+        // Créer un compte avec les données Google
+        createGoogleAccount(payload);
         
     } catch (error) {
         console.error('❌ Erreur décodage token:', error);
-        showLoginError('Erreur: impossible de décoder le token');
     }
 }
 
-// Créer ou connecter un compte automatiquement avec les données Google
-function createOrLoginGoogleAccount(googleData, rawToken) {
-    try {
-        console.log('🎮 === DÉBUT CRÉATION/CONNEXION GOOGLE ===');
+// Créer un compte automatique avec les données Google
+function createGoogleAccount(googleData) {
+    // Utiliser l'email comme pseudo (avant le @)
+    const pseudo = googleData.email.split('@')[0];
+    const code = googleData.sub; // Google User ID unique comme code
+    
+    console.log(`🎮 Création de compte: ${pseudo}`);
+    
+    // Créer le compte via le système de comptes existant
+    const result = accountSystem.createAccount(pseudo, code);
+    
+    if (result.success) {
+        console.log(`✅✅ Compte Google créé: ${pseudo}`);
         
-        const pseudo = googleData.email.split('@')[0];
-        const code = googleData.sub;
-        const email = googleData.email;
-        // Prefer explicit rawToken passed from handleGoogleSignIn (contains the id_token)
-        const token = rawToken || googleData.credential || googleData.id_token; // Token Google complet
-        
-        console.log(`   Email: ${email}`);
-        console.log(`   Pseudo: ${pseudo}`);
-        
-        if (!window.accountSystem) throw new Error('accountSystem n\'est pas chargé');
-        console.log('✅ accountSystem prêt');
-        
-        if (!window.uiManager) throw new Error('uiManager n\'est pas chargé');
-        console.log('✅ uiManager prêt');
-        
-        // Étape 1: Vérifier le token avec le backend
-        console.log('🔐 Vérification du token avec le serveur...');
-        verifyGoogleTokenWithBackend(token, email, pseudo, code);
-        
-    } catch (error) {
-        console.error('❌ ERREUR CRÉATION/CONNEXION:', error.message);
-        showLoginError(`Erreur: ${error.message}`);
-    }
-}
-
-// Vérifier le token Google avec le backend
-async function verifyGoogleTokenWithBackend(token, email, pseudo, code) {
-    try {
-        const serverUrl = window.accountSystem.serverUrl;
-        
-        const response = await fetch(`${serverUrl}/api/auth/verify-google`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token })
-        });
-
-        if (!response.ok) {
-            const bodyText = await response.text().catch(() => null);
-            console.error('❌ verifyGoogleTokenWithBackend non-ok response:', response.status, bodyText);
-            throw new Error(`Erreur serveur: ${response.status}${bodyText ? ' - ' + bodyText : ''}`);
+        // Se connecter automatiquement
+        const loginResult = accountSystem.login(pseudo, code);
+        if (loginResult.success) {
+            console.log(`✅ Connexion automatique réussie`);
+            
+            // Aller au lobby
+            if (window.uiManager) {
+                uiManager.showPage('lobbyPage');
+                uiManager.updateLobbyDisplay();
+                console.log('✅ Redirection au lobby');
+            }
         }
-
-        const data = await response.json();
-        const maxRetries = 3;
-        let attempt = 0;
-        let lastError = null;
-
-        while (attempt < maxRetries) {
-            try {
-                attempt++;
-                const response = await fetch(`${serverUrl}/api/auth/verify-google`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token })
-                });
-
-                if (!response.ok) {
-                    const bodyText = await response.text().catch(() => null);
-                    console.error('❌ verifyGoogleTokenWithBackend non-ok response:', response.status, bodyText);
-                    throw new Error(`Erreur serveur: ${response.status}${bodyText ? ' - ' + bodyText : ''}`);
+    } else {
+        console.warn(`⚠️ ${result.message}`);
+        
+        // Si le compte existe déjà, se connecter simplement
+        if (result.message.includes('déjà')) {
+            const loginResult = accountSystem.login(pseudo, code);
+            if (loginResult.success) {
+                console.log(`✅ Connexion réussie (compte existant)`);
+                
+                if (window.uiManager) {
+                    uiManager.showPage('lobbyPage');
+                    uiManager.updateLobbyDisplay();
                 }
-
-                const data = await response.json();
-                // success -> break loop
-                lastError = null;
-                // proceed with success handling below
-                // set data to a temp var via closure
-                verifyGoogleTokenWithBackend._lastData = data;
-                break;
-            } catch (err) {
-                lastError = err;
-                console.warn(`🔁 verify-google attempt ${attempt} failed:`, err.message);
-                // small delay before retry
-                await new Promise(r => setTimeout(r, 600 * attempt));
             }
         }
-
-        if (lastError) {
-            throw lastError;
-        }
-        
-        if (!data.success) {
-            throw new Error(data.message || 'Vérification échouée');
-        }
-
-        // Mettre à jour l'email dans le système de comptes
-        window.accountSystem.currentUserEmail = email;
-        
-        // 🔥 RAILWAY-ONLY: Load account from Railway backend
-        let account = await window.accountSystem.loadAccountFromRailway(email);
-        
-        // If not on Railway, create new account
-        if (!account) {
-            console.log(`ℹ️ Nouveau compte: créer sur Railway`);
-            account = {
-                pseudo: pseudo,
-                code: code,
-                email: email,
-                googleSub: code,
-                xp: 0,
-                level: 1,
-                bestScore: 0,
-                ownedItems: { skins: [0], musics: [0] },
-                equippedSkin: 0,
-                equippedMusic: 0,
-                musicVolume: 100,
-                effectsVolume: 100,
-                controls: { left: 'a', right: 'd', rotate: 'w', down: 's', hardDrop: ' ' },
-                createdAt: new Date().toISOString(),
-                lastLogin: new Date().toISOString()
-            };
-        } else {
-            // Update lastLogin timestamp
-            account.lastLogin = new Date().toISOString();
-        }
-
-        window.accountSystem.accounts[pseudo] = account;
-        window.accountSystem.currentUser = pseudo;
-        
-        // 🔥 Immediately save to Railway (ONLY destination)
-        window.accountSystem.saveAccounts();
-        
-        console.log('📦 Compte syncronisé avec Railway, préparation connexion...');
-        proceedWithLogin(pseudo, code, email);
-        
-    } catch (error) {
-        console.error('❌ Erreur vérification backend:', error.message);
-        // Fallback: créer le compte localement même si serveur indisponible
-        console.log('⚠️ Fallback local (serveur indisponible)');
-        showLoginError('Erreur vérification serveur: ' + (error.message || 'Erreur inconnue'));
-        proceedWithLoginLocal(pseudo, code, email);
-    }
-}
-
-// Procéder avec la connexion (version local fallback)
-async function proceedWithLoginLocal(pseudo, code, email) {
-    try {
-        console.log('📝 Création de compte (mode local + Railway)...');
-        const createResult = window.accountSystem.createAccount(pseudo, code);
-        
-        if (createResult.success) {
-            console.log(`✅ Nouveau compte créé: ${pseudo}`);
-            window.accountSystem.accounts[pseudo].email = email;
-            window.accountSystem.accounts[pseudo].googleSub = code;
-        } else {
-            console.log(`ℹ️ Compte existe déjà: ${pseudo}`);
-            if (!window.accountSystem.accounts[pseudo].email) {
-                window.accountSystem.accounts[pseudo].email = email;
-            }
-        }
-        
-        window.accountSystem.currentUserEmail = email;
-        
-        // 🔥 RAILWAY-ONLY: Always save to Railway
-        window.accountSystem.saveAccounts();
-        
-        // Connexion
-        console.log('🔓 Connexion au compte...');
-        const loginResult = window.accountSystem.login(pseudo, code);
-        
-        if (!loginResult.success) {
-            throw new Error(`Connexion échouée: ${loginResult.message}`);
-        }
-        
-        console.log(`✅✅ Connexion réussie: ${pseudo}`);
-        
-        // Redirection
-        setTimeout(() => {
-            console.log('📍 Redirection au lobby...');
-            window.uiManager.showPage('lobbyPage');
-            window.uiManager.updateLobbyDisplay();
-            console.log('✅✅✅ REDIRECTION COMPLÈTE - Bienvenue!');
-        }, 300);
-    } catch (error) {
-        console.error('❌ ERREUR:', error.message);
-        showLoginError(`Erreur: ${error.message}`);
-    }
-}
-
-// Afficher une erreur sur la page
-function showLoginError(message) {
-    console.error('🔴 ' + message);
-    const errorDiv = document.getElementById('loginError');
-    if (errorDiv) {
-        errorDiv.textContent = message;
-        errorDiv.style.display = 'block';
     }
 }
 
 // Exporter globalement
 window.handleGoogleSignIn = handleGoogleSignIn;
-window.createOrLoginGoogleAccount = createOrLoginGoogleAccount;
-window.showLoginError = showLoginError;
+window.createGoogleAccount = createGoogleAccount;
 
-console.log('🔐 Google Sign-In module chargé - Flow: One-Tap Direct');
+console.log('🔐 Google Sign-In module chargé');

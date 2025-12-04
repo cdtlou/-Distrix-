@@ -18,20 +18,25 @@ class UIManager {
     }
 
     setupEventListeners() {
-        // LOGIN PAGE - Les boutons peuvent ne pas exister si on utilise Google-only
-        const createBtn = document.getElementById('createBtn');
-        const loginBtn = document.getElementById('loginBtn');
-        const pseudoInput = document.getElementById('pseudoInput');
-        const codeInput = document.getElementById('codeInput');
+        // LOGIN PAGE
+        document.getElementById('createBtn').addEventListener('click', () => this.createAccount());
+        document.getElementById('loginBtn').addEventListener('click', () => this.login());
         
-        if (createBtn) createBtn.addEventListener('click', () => this.createAccount());
-        if (loginBtn) loginBtn.addEventListener('click', () => this.login());
+        // GitHub Login Button
+        const githubLoginBtn = document.getElementById('githubLoginBtn');
+        if (githubLoginBtn) {
+            githubLoginBtn.addEventListener('click', () => {
+                if (window.githubAuth) {
+                    window.githubAuth.loginWithGitHub();
+                }
+            });
+        }
         
         // Permettre la connexion avec Entrée
-        if (pseudoInput) pseudoInput.addEventListener('keypress', (e) => {
+        document.getElementById('pseudoInput').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this.login();
         });
-        if (codeInput) codeInput.addEventListener('keypress', (e) => {
+        document.getElementById('codeInput').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this.login();
         });
 
@@ -154,6 +159,17 @@ class UIManager {
             document.getElementById('pseudoInput').value = '';
             document.getElementById('codeInput').value = '';
             
+            // Charger les comptes depuis GitHub si l'utilisateur est connecté
+            if (window.githubAuth && window.githubAuth.isAuthenticated) {
+                window.githubAuth.loadAccountsFromGitHub().then(githubAccounts => {
+                    if (githubAccounts) {
+                        // Fusionner les comptes GitHub avec les comptes locaux
+                        accountSystem.accounts = { ...accountSystem.accounts, ...githubAccounts };
+                        accountSystem.saveAccounts();
+                    }
+                });
+            }
+            
             // Vérifier que l'utilisateur est bien connecté
             setTimeout(() => {
                 this.showPage('lobbyPage');
@@ -164,57 +180,10 @@ class UIManager {
     }
 
     logout() {
-        // Récupérer l'utilisateur courant avant la déconnexion
-        const currentPseudo = accountSystem.currentUser;
-        const currentAccount = currentPseudo ? accountSystem.accounts[currentPseudo] : null;
-        const googleIdToRevoke = currentAccount ? (currentAccount.googleSub || currentAccount.code) : null;
-
-        // Effectuer la déconnexion locale
         accountSystem.logout();
         document.getElementById('pseudoInput').value = '';
         document.getElementById('codeInput').value = '';
-
-        // Retourner à la page de connexion
         this.showPage('loginPage');
-
-        // Effacer les messages d'erreur éventuels
-        const errorDiv = document.getElementById('loginError');
-        if (errorDiv) {
-            errorDiv.textContent = '';
-            errorDiv.style.display = 'none';
-        }
-
-        // Essayer d'annuler/stopper le One-Tap et désactiver l'auto-select immédiatement
-        try {
-            if (window.google && window.google.accounts && window.google.accounts.id) {
-                const gid = window.google.accounts.id;
-
-                // Annuler tout One-Tap déjà affiché
-                if (typeof gid.cancel === 'function') gid.cancel();
-
-                // Empêcher la sélection automatique du compte précédemment utilisé
-                if (typeof gid.disableAutoSelect === 'function') gid.disableAutoSelect();
-
-                // Tenter de révoquer l'accès pour empêcher une reconnexion automatique (optionnel)
-                if (googleIdToRevoke && typeof gid.revoke === 'function') {
-                    try {
-                        gid.revoke(googleIdToRevoke, (done) => {
-                            console.log('🔒 Google revoke callback:', done);
-                            // Après révocation, demander le prompt pour choisir un compte
-                            if (typeof gid.prompt === 'function') gid.prompt();
-                        });
-                    } catch (e) {
-                        console.warn('⚠️ Erreur lors du revoke Google:', e);
-                        if (typeof gid.prompt === 'function') gid.prompt();
-                    }
-                } else {
-                    // Si pas de revoke possible, simplement demander le prompt
-                    if (typeof gid.prompt === 'function') gid.prompt();
-                }
-            }
-        } catch (err) {
-            console.warn("⚠️ Impossible d'appeler Google Identity API lors de la déconnexion:", err);
-        }
     }
 
     showError(message, type = 'error') {
@@ -742,9 +711,9 @@ class UIManager {
             <div style="white-space: pre-line; font-size: 13px; line-height: 1.6; color: #ddd; font-family: monospace;">
                 ${changelog.split('\n').map(line => {
                     if (line.startsWith('v')) {
-                        return '<span style="color: #667eea; font-weight: bold;">' + line + '</span>';
+                        return `<span style="color: #667eea; font-weight: bold;">${line}</span>`;
                     } else if (line.startsWith('-')) {
-                        return '<span style="color: #90ee90;">├─ ' + line.substring(1) + '</span>';
+                        return `<span style="color: #90ee90;">├─ ${line.substring(1)}</span>`;
                     }
                     return line;
                 }).join('\n')}
@@ -771,21 +740,5 @@ class UIManager {
     }
 }
 
-// Instance globale - avec gestion des erreurs
-let uiManager;
-try {
-    console.log('🚀 Création de UIManager...');
-    uiManager = new UIManager();
-    window.uiManager = uiManager;
-    console.log('✅ UIManager créé et attaché à window');
-} catch (error) {
-    console.error('❌ Erreur création UIManager:', error);
-    console.error('Stack:', error.stack);
-    // Créer un objet dummy pour éviter les crashes
-    window.uiManager = {
-        showPage: () => console.warn('UIManager non disponible'),
-        updateLobbyDisplay: () => console.warn('UIManager non disponible'),
-        createAccount: () => console.warn('UIManager non disponible'),
-        login: () => console.warn('UIManager non disponible')
-    };
-}
+// Instance globale
+const uiManager = new UIManager();

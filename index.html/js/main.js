@@ -66,29 +66,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Backup UI removed — no setup required
 
-    // Restaurer la session quand les comptes sont prêts (évite les problèmes sur reload)
-    const tryRestoreSession = () => {
-        if (!window.uiManager) {
-            console.warn('⚠️ uiManager pas disponible');
-            return;
-        }
-
-        if (accountSystem.currentUser) {
-            window.uiManager.showPage('lobbyPage');
-            window.uiManager.updateLobbyDisplay();
-            console.log(`✅ Session restaurée pour ${accountSystem.currentUser}`);
-        } else {
-            window.uiManager.showPage('loginPage');
-        }
-    };
-
-    // Écouter l'événement déclenché par AccountSystem après chargement
-    window.addEventListener('accounts-ready', () => {
-        tryRestoreSession();
-    });
-
-    // Essayer immédiatement au cas où les comptes sont déjà chargés
-    tryRestoreSession();
+    // Vérifier si un utilisateur est déjà connecté (en cas de rechargement)
+    if (accountSystem.currentUser) {
+        // Restaurer la session
+        uiManager.showPage('lobbyPage');
+        uiManager.updateLobbyDisplay();
+        console.log(`✅ Session restaurée pour ${accountSystem.currentUser}`);
+    } else {
+        uiManager.showPage('loginPage');
+    }
 
     // Initialiser les volumes du système audio
     const user = accountSystem.getCurrentUser();
